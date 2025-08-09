@@ -4,6 +4,7 @@ import scratchattach as scratch3
 import random
 import string
 import os
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,12 +23,13 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 
 # Scratchログイン
-session = scratch3.login_by_id(SESSION_ID, username="xenec")  # usernameは適宜変更
+session = scratch3.login_by_id(SESSION_ID, username="p9el")  # usernameは適宜変更
 conn = session.connect_project(PROJECT_ID)
 user = session.get_linked_user()
 print(f"{user.username}でScratchにログインしました")
 
-verify_codes = {}  # {discord_user_id: (scratch_username, code)}
+# {discord_user_id: (scratch_username, code, 発行時刻)}
+verify_codes = {}
 
 
 def generate_code(length=6):
@@ -80,11 +82,13 @@ async def on_ready():
 async def verify(interaction: discord.Interaction, scratch_username: str):
     """Scratch認証用スラッシュコマンド"""
     code = generate_code()
-    verify_codes[interaction.user.id] = (scratch_username, code)
+    issued_time = time.time()  # 発行時刻を記録
+    verify_codes[interaction.user.id] = (scratch_username, code, issued_time)
 
     try:
         await interaction.user.send(
             f"✅ 認証コードを生成しました。\n"
+            f"⏳ 有効期限: 2分\n"
             f"Scratchで次のコードをコメントしてください： `{code}`\n"
             f"<https://scratch.mit.edu/projects/{PROJECT_ID}>"
         )
@@ -98,18 +102,35 @@ async def verify(interaction: discord.Interaction, scratch_username: str):
 
 @tasks.loop(seconds=10)
 async def check_comments():
-    """Scratchプロジェクトのコメントを定期的に確認"""
+    """Scratchプロジェクトのコメントを定期的に確認 & 有効期限チェック"""
+    current_time = time.time()
+
+    # まず期限切れチェック
+    for discord_id, (expected_user, code, issued_time) in list(verify_codes.items()):
+        if current_time - issued_time > 120:  # 2分(120秒)経過
+            member = bot.get_user(discord_id)
+            if member:
+                try:
+                    await member.send(
+                        f"⌛ 認証コード `{code}` の有効期限が切れました。\n"
+                        f"もう一度 `/verify` コマンドでやり直してください。"
+                    )
+                except discord.Forbidden:
+                    print(f"[WARN] {member} に期限切れDMを送れませんでした。")
+            del verify_codes[discord_id]
+
+    # コメントチェック
     comments = conn.comments()
     for comment in comments:
         content = comment.content
         author = comment.author()
         scratch_username = author.username
 
-        for discord_id, (expected_user, code) in list(verify_codes.items()):
+        for discord_id, (expected_user, code, issued_time) in list(verify_codes.items()):
             if scratch_username.lower() == expected_user.lower() and code in content:
                 guild = bot.get_guild(GUILD_ID)
                 await handle_auth_success(scratch_username, discord_id, guild)
-                del verify_codes[discord_id]
+                del verify_codes[discord_id]  # 認証成功したらカウントダウン終了
                 break
 
 bot.run(DISCORD_TOKEN)
