@@ -1,0 +1,2 @@
+# NasuBot
+NasuServer's bot
